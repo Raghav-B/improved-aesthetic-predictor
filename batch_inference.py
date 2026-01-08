@@ -107,13 +107,13 @@ def process_batch(image_paths, clip_model, preprocess, mlp_model, device, batch_
     return results
 
 
-def save_results(results, output_dir="aesthetic_scores"):
+def save_results(results, input_file_pattern:str, output_dir="aesthetic_scores"):
     """Save results as txt files maintaining directory structure."""
     output_path = Path(output_dir)
     output_path.mkdir(exist_ok=True)
     
     # Create a summary file
-    summary_file = output_path / "all_scores.txt"
+    summary_file = output_path / f"{input_file_pattern}_scores.txt"
     with open(summary_file, 'w') as f:
         f.write("Image Path\tAesthetic Score\n")
         for img_path, score in results:
@@ -170,7 +170,8 @@ def main():
     
     # Save results
     print("\nSaving results...")
-    save_results(results, output_dir=args.output_dir)
+    input_file_pattern = os.path.splitext(args.filename)[0]
+    save_results(results, input_file_pattern, output_dir=args.output_dir)
     
     # Print statistics
     scores = [score for _, score in results]

@@ -1,130 +1,88 @@
-import webdataset as wds
-from PIL import Image
-import io
-import matplotlib.pyplot as plt
-import os
-import json
-
-from warnings import filterwarnings
-
-
-# os.environ["CUDA_VISIBLE_DEVICES"] = "0"    # choose GPU if you are on a multi GPU server
-import numpy as np
-import torch
-import pytorch_lightning as pl
-import torch.nn as nn
-from torchvision import datasets, transforms
-import tqdm
-
-from os.path import join
-# from datasets import load_dataset
+import argparse
+from pathlib import Path
 import pandas as pd
-from torch.utils.data import Dataset, DataLoader
-import json
-
-import clip
-#import open_clip
-
-from PIL import Image, ImageFile
-
-from mlp import MLP
-
-def normalized(a, axis=-1, order=2):
-    import numpy as np  # pylint: disable=import-outside-toplevel
-
-    l2 = np.atleast_1d(np.linalg.norm(a, order, axis))
-    l2[l2 == 0] = 1
-    return a / np.expand_dims(l2, axis)
+import numpy as np
 
 
-model = MLP(768)  # CLIP embedding dim is 768 for CLIP ViT L 14
+def load_scores(scores_file: str):
+   """Load scores TSV (Image Path \t Aesthetic Score)."""
+   scores_path = Path(scores_file)
+   if not scores_path.exists():
+      raise FileNotFoundError(f"Scores file not found: {scores_path}")
 
-s = torch.load("ava+logos-l14-linearMSE.pth")   # load the model you trained previously or the model available in this repo
+   df = pd.read_csv(scores_path, sep="\t")
+   # Normalize column names
+   df.columns = [c.strip().lower().replace(" ", "_") for c in df.columns]
+   if "image_path" not in df.columns or "aesthetic_score" not in df.columns:
+      raise ValueError("Scores file must have columns: Image Path, Aesthetic Score")
 
-model.load_state_dict(s)
+   df = df.rename(columns={"image_path": "filepath", "aesthetic_score": "prediction"})
+   df["filepath"] = df["filepath"].astype(str)
+   df["prediction"] = pd.to_numeric(df["prediction"], errors="coerce")
+   df = df.dropna(subset=["prediction"])
 
-
-model.to("cuda")
-model.eval()
-
-
-
-
-
-device = "cuda" if torch.cuda.is_available() else "cpu"
-model2, preprocess = clip.load("ViT-L/14", device=device)  #RN50x64   
-
-
-
-c=0
-urls= []
-predictions=[]
-
-# this will run inference over 10 webdataset tar files from LAION 400M and sort them into 20 categories
-# you can DL LAION 400M and convert it to wds tar files with img2dataset ( https://github.com/rom1504/img2dataset ) 
+   # Keep only files that exist
+   df["filepath"] = df["filepath"].apply(lambda p: str(Path(p).expanduser().resolve()))
+   df = df[df["filepath"].apply(lambda p: Path(p).exists())]
+   return df
 
 
-for j in range(10):
-   if j<10:
-     # change the path to the tar files accordingly
-     dataset = wds.WebDataset("pipe:aws s3 cp s3://s-datasets/laion400m/laion400m-dat-release/0000"+str(j)+".tar -")  #"pipe:aws s3 cp s3://s-datasets/laion400m/laion400m-dat-release/00625.tar -")
-   else:
-     dataset = wds.WebDataset("pipe:aws s3 cp s3://s-datasets/laion400m/laion400m-dat-release/000"+str(j)+".tar -")  #"pipe:aws s3 cp s3://s-datasets/laion400m/laion400m-dat-release/00625.tar -")
+def build_buckets(min_score: float, max_score: float, step: float):
+   start = np.floor(min_score / step) * step
+   end = np.ceil(max_score / step) * step
+   edges = np.arange(start, end + step, step)
+   buckets = [(edges[i], edges[i + 1]) for i in range(len(edges) - 1)]
+   return buckets
 
 
-   for i, d in enumerate(dataset):
-      print(c)
+def make_html(df: pd.DataFrame, output_file: str, bucket_step: float = 0.5, samples_per_bucket: int = 50):
+   if df.empty:
+      raise ValueError("No scores available to visualize.")
 
-      metadata= json.loads(d['json'])       
+   min_score = df["prediction"].min()
+   max_score = df["prediction"].max()
+   buckets = build_buckets(min_score, max_score, bucket_step)
 
-      pil_image = Image.open(io.BytesIO(d['jpg']))
-      c=c+1
-      try:
-         image = preprocess(pil_image).unsqueeze(0).to(device)
+   html_parts = ["<h1>Aesthetic subsets from local data</h1>"]
 
-      except:
+   for a, b in buckets:
+      total_part = df[(df["prediction"] >= a) & (df["prediction"] < b)]
+      count_part = len(total_part)
+      if count_part == 0:
          continue
 
-      with torch.no_grad():
-         image_features = model2.encode_image(image)
+      percent = count_part / len(df) * 100
+      part = total_part.head(samples_per_bucket)
+
+      html_parts.append(
+         f"<h2>Bucket {a:.2f} - {b:.2f}: {percent:.2f}% ({count_part} samples)</h2><div>"
+      )
+      for filepath in part["filepath"]:
+         src = Path(filepath).as_uri()
+         html_parts.append(f'<img src="{src}" height="200" />')
+      html_parts.append("</div>")
+
+   html = "\n".join(html_parts)
+   out_path = Path(output_file)
+   out_path.write_text(html)
+   return out_path
 
 
-      im_emb_arr = normalized(image_features.cpu().detach().numpy() )
+def main():
+   parser = argparse.ArgumentParser(description="Visualize aesthetic score buckets for local data")
+   parser.add_argument("--scores-file", default="aesthetic_scores/all_scores.txt", help="Path to TSV with Image Path and Aesthetic Score columns")
+   parser.add_argument("--output-file", default="aesthetic_viz_local.html", help="Output HTML file")
+   parser.add_argument("--bucket-step", type=float, default=0.5, help="Bucket width for scores")
+   parser.add_argument("--samples-per-bucket", type=int, default=50, help="Max images to show per bucket")
+   args = parser.parse_args()
 
-      prediction = model(torch.from_numpy(im_emb_arr).to(device).type(torch.cuda.FloatTensor))
-      urls.append(metadata["url"])
-      predictions.append(prediction)
+   df = load_scores(args.scores_file)
+   print(f"Loaded {len(df)} scored images from {args.scores_file}")
 
-
-df = pd.DataFrame(list(zip(urls, predictions)),
-               columns =['filepath', 'prediction'])
-
-
-buckets = [(i, i+1) for i in range(20)]
-
-
-html= "<h1>Aesthetic subsets in LAION 100k samples</h1>"
-
-i =0
-for [a,b] in buckets:
-    a = a/2
-    b = b/2
-    total_part = df[(  (df["prediction"] ) *1>= a) & (  (df["prediction"] ) *1 <= b)]
-    print(a,b)
-    print(len(total_part) )
-    count_part = len(total_part) / len(df) * 100
-    estimated =int ( len(total_part) )
-    part = total_part[:50]
-
-    html+=f"<h2>In bucket {a} - {b} there is {count_part:.2f}% samples:{estimated:.2f} </h2> <div>"
-    for filepath in part["filepath"]:
-        html+='<img src="'+filepath +'" height="200" />'
+   out_path = make_html(df, args.output_file, bucket_step=args.bucket_step, samples_per_bucket=args.samples_per_bucket)
+   print(f"Wrote visualization to {out_path}")
+   print("Open the HTML in a browser to view the buckets.")
 
 
-    html+="</div>"
-    i+=1
-    print(i)
-with open("./aesthetic_viz_laion_ava+logos_L14_100k-linearMSE.html", "w") as f:
-    f.write(html)
-    
-
+if __name__ == "__main__":
+   main()
