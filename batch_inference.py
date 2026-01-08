@@ -1,5 +1,7 @@
 import os
 import argparse
+import json
+import struct
 from pathlib import Path
 import torch
 import torch.nn as nn
@@ -64,7 +66,46 @@ def find_all_images(root_dir, filename="gen_mesh_thumbnail.png"):
     return image_paths
 
 
-def process_batch(image_paths, clip_model, preprocess, mlp_model, device, batch_size=32):
+def glb_has_texture(glb_path: Path) -> bool:
+    """Return True if GLB has any textures/images; False otherwise."""
+    try:
+        with open(glb_path, "rb") as f:
+            header = f.read(12)
+            if len(header) < 12 or header[0:4] != b"glTF":
+                return False
+            _, _, _ = struct.unpack("<III", header)
+
+            chunk_header = f.read(8)
+            if len(chunk_header) < 8:
+                return False
+            chunk_length, chunk_type = struct.unpack("<II", chunk_header)
+            if chunk_type != 0x4E4F534A:  # 'JSON'
+                return False
+
+            json_str = f.read(chunk_length).decode("utf-8", errors="replace")
+            data = json.loads(json_str)
+
+            images = data.get("images", [])
+            textures = data.get("textures", [])
+            materials = data.get("materials", [])
+
+            has_tex = bool(images or textures)
+            if not has_tex:
+                for mat in materials:
+                    pmr = mat.get("pbrMetallicRoughness", {})
+                    if "baseColorTexture" in pmr:
+                        has_tex = True
+                        break
+                    if mat.get("normalTexture") or mat.get("emissiveTexture"):
+                        has_tex = True
+                        break
+            return has_tex
+    except Exception as e:
+        print(f"Texture check failed for {glb_path}: {e}")
+        return False
+
+
+def process_batch(image_paths, clip_model, preprocess, mlp_model, device, batch_size=32, glb_name="gen_mesh_decimated_5000.glb"):
     """Process a batch of images and return predictions with paths."""
     results = []
     
@@ -75,6 +116,11 @@ def process_batch(image_paths, clip_model, preprocess, mlp_model, device, batch_
         
         # Load and preprocess images
         for img_path in batch_paths:
+            # Skip if paired GLB is missing or lacks texture
+            glb_path = img_path.parent / glb_name
+            if not glb_path.exists() or not glb_has_texture(glb_path):
+                continue
+
             try:
                 pil_image = Image.open(img_path).convert('RGB')
                 image = preprocess(pil_image)
@@ -137,6 +183,7 @@ def main():
     parser.add_argument("--filename", default="gen_mesh_thumbnail.png", help="Target filename to score (searched recursively)")
     parser.add_argument("--output-dir", default="aesthetic_scores", help="Directory to store summary and outputs")
     parser.add_argument("--batch-size", type=int, default=32, help="Batch size for CLIP encoding")
+    parser.add_argument("--glb-name", default="gen_mesh_decimated_5000.glb", help="Name of GLB file colocated with each image")
     args = parser.parse_args()
 
     root_dir = args.root_dir
@@ -166,7 +213,7 @@ def main():
     
     # Process images
     print(f"\nProcessing images with batch size {batch_size}...")
-    results = process_batch(image_paths, clip_model, preprocess, mlp_model, device, batch_size)
+    results = process_batch(image_paths, clip_model, preprocess, mlp_model, device, batch_size, glb_name=args.glb_name)
     
     # Save results
     print("\nSaving results...")
