@@ -1,6 +1,7 @@
 import webdataset as wds
 from PIL import Image
 import io
+import sys
 import matplotlib.pyplot as plt
 import os
 import json
@@ -17,7 +18,7 @@ from torchvision import datasets, transforms
 import tqdm
 
 from os.path import join
-from datasets import load_dataset
+# from datasets import load_dataset
 import pandas as pd
 from torch.utils.data import Dataset, DataLoader
 import json
@@ -30,7 +31,7 @@ from PIL import Image, ImageFile
 
 #####  This script will predict the aesthetic score for this image file:
 
-img_path = "test.jpg"
+img_path = sys.argv[1]  # provide path to image here
 
 
 
